@@ -3,6 +3,6 @@
   "description": "Hold a heist puzzle message and your Decode app runs instantly (no Apps menu).",
   "authors": [{ "name": "you", "id": "0" }],
   "main": "index.js",
-  "hash": "qd1",
+  "hash": "qd3",
   "vendetta": { "icon": "ic_message_edit" }
 }
