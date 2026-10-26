@@ -6,7 +6,7 @@
   const COMMAND_NAME = "Decode";          // the message command name
   const ONLY_AUTHOR_ID = "";              // optional: Paimon's user id, so only its messages trigger (empty = any bot message with an image)
   const HIDE_SHEET = true;                // close the long-press menu on puzzle messages
-  const MODE = "double";                  // "double" = double-tap the puzzle, "hold" = long-press, "both"
+  const MODE = "both";                    // "double" = double-tap the puzzle, "hold" = long-press, "both"
   const DOUBLE_TAP_MS = 350;              // max gap between the two taps
   const DEBUG = true;                     // show small toasts so we can see what the plugin is doing
   const CMD_ID = "";                      // optional: Decode command id (only if auto-lookup fails)
@@ -136,6 +136,7 @@
 
   function onTap(message) {
     const now = Date.now();
+    if (DEBUG) showToast("Quick Decode: tap");
     const prev = lastTap[message.id] || 0;
     lastTap[message.id] = now;
     if (now - prev < DOUBLE_TAP_MS) {
@@ -201,6 +202,8 @@
       if (HIDE_SHEET) setTimeout(function () { try { ActionSheet.hideActionSheet(); } catch (e) {} }, 120);
     }));
   }
+
+  if (DEBUG) showToast("Quick Decode v5 loaded (" + MODE + (MODE !== "hold" ? ", double-tap " + (doubleOK ? "hooked" : "OFF") : "") + ")");
 
   exports.onUnload = function () { unpatches.forEach(function (u) { try { u(); } catch (e) {} }); };
   return exports;
