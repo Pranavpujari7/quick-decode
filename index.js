@@ -14,8 +14,7 @@
   // --------------------------------------------
 
   const { findByProps, findByStoreName, findByName } = vendetta.metro;
-  const { before, after } = vendetta.patcher;
-  const React = vendetta.metro.common.React;
+  const { before, instead } = vendetta.patcher;
   const { showToast } = vendetta.ui.toasts;
 
   const ActionSheet = findByProps("openLazy", "hideActionSheet");
@@ -23,11 +22,11 @@
   const SessionStore = findByProps("getSessionId");
   const Snowflake = findByProps("fromTimestamp");
   const ChannelStore = findByStoreName("ChannelStore");
+  const MessageStore = findByStoreName("MessageStore");
+  const ReactionActions = findByProps("addReaction", "removeReaction");
 
   const unpatches = [];
   const lastFired = {};
-  const lastTap = {};
-  let tapNoted = false;
   let cmdCache = null;
 
   function nonce() {
@@ -114,82 +113,21 @@
     runDecode(message);
   }
 
-  // ---- double-tap: wrap the message row's press handler ----
-  const PRESS_KEYS = ["onPress", "onTapMessage", "onPressMessage", "onTap"];
-
-  function findPress(node, depth) {
-    if (!node || typeof node !== "object" || depth > 4) return null;
-    const props = node.props;
-    if (props && typeof props === "object") {
-      for (let i = 0; i < PRESS_KEYS.length; i++) {
-        if (typeof props[PRESS_KEYS[i]] === "function") return { node: node, key: PRESS_KEYS[i] };
-      }
-      const kids = props.children;
-      const list = Array.isArray(kids) ? kids : (kids ? [kids] : []);
-      for (let j = 0; j < list.length; j++) {
-        const r = findPress(list[j], depth + 1);
-        if (r) return r;
-      }
-    }
-    return null;
-  }
-
-  function onTap(message) {
-    const now = Date.now();
-    if (DEBUG) showToast("Quick Decode: tap");
-    const prev = lastTap[message.id] || 0;
-    lastTap[message.id] = now;
-    if (now - prev < DOUBLE_TAP_MS) {
-      lastTap[message.id] = 0;
-      fire(message);
-    }
-  }
-
-  function wrapRow(row, message) {
-    const hit = findPress(row, 0);
-    const make = function (orig) {
-      if (orig && orig.__qd) return orig;
-      const w = function () {
-        try { onTap(message); } catch (e) {}
-        return orig ? orig.apply(this, arguments) : undefined;
-      };
-      w.__qd = true;
-      return w;
-    };
-    if (hit) {
-      if (DEBUG && !tapNoted) { tapNoted = true; showToast("Quick Decode: tap hook on " + hit.key); }
-      const wrapped = make(hit.node.props[hit.key]);
-      if (hit.node === row) {
-        const patch = {}; patch[hit.key] = wrapped;
-        return React.cloneElement(row, patch);
-      }
-      try { hit.node.props[hit.key] = wrapped; } catch (e) {
-        try { hit.node.props = Object.assign({}, hit.node.props, (function () { const o = {}; o[hit.key] = wrapped; return o; })()); } catch (e2) {}
-      }
-      return row;
-    }
-    if (DEBUG && !tapNoted) {
-      tapNoted = true;
-      showToast("Quick Decode: no press handler. row keys: " + Object.keys((row && row.props) || {}).slice(0, 12).join(","));
-    }
-    return row;
-  }
-
+  // ---- double-tap: Discord's built-in double-tap adds a reaction, so we catch that ----
   let doubleOK = false;
-  if (MODE === "double" || MODE === "both") {
+  if ((MODE === "double" || MODE === "both") && ReactionActions && MessageStore) {
     try {
-      const RowManager = findByName("RowManager");
-      if (RowManager && RowManager.prototype && RowManager.prototype.generate) {
-        unpatches.push(after("generate", RowManager.prototype, function (args, row) {
-          const data = args[0];
-          if (!data || !data.message || !row || !isPuzzle(data.message)) return;
-          return wrapRow(row, data.message);
-        }));
-        doubleOK = true;
-      }
+      unpatches.push(instead("addReaction", ReactionActions, function (args, orig) {
+        try {
+          const m = MessageStore.getMessage(args[0], args[1]) || MessageStore.getMessage(args[1], args[0]);
+          if (m && isPuzzle(m)) { fire(m); return; }      // swallow the reaction, decode instead
+        } catch (e) {}
+        return orig.apply(this, args);
+      }));
+      doubleOK = true;
     } catch (e) { doubleOK = false; }
-    if (!doubleOK) showToast("Quick Decode: double-tap hook unavailable, using hold");
   }
+  if ((MODE === "double" || MODE === "both") && !doubleOK) showToast("Quick Decode: double-tap hook unavailable, using hold");
 
   // ---- hold (long-press) ----
   if ((MODE === "hold" || MODE === "both" || !doubleOK) && ActionSheet && RestAPI) {
@@ -203,7 +141,7 @@
     }));
   }
 
-  if (DEBUG) showToast("Quick Decode v5 loaded (" + MODE + (MODE !== "hold" ? ", double-tap " + (doubleOK ? "hooked" : "OFF") : "") + ")");
+  if (DEBUG) showToast("Quick Decode v6 loaded (" + MODE + (MODE !== "hold" ? ", double-tap " + (doubleOK ? "hooked" : "OFF") : "") + ")");
 
   exports.onUnload = function () { unpatches.forEach(function (u) { try { u(); } catch (e) {} }); };
   return exports;
