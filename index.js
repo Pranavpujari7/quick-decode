@@ -24,6 +24,10 @@
   const ChannelStore = findByStoreName("ChannelStore");
   const MessageStore = findByStoreName("MessageStore");
   const ReactionActions = findByProps("addReaction", "removeReaction");
+  const PermissionStore = findByStoreName("PermissionStore");
+  const PermConsts = (vendetta.metro.common.constants && vendetta.metro.common.constants.Permissions) ||
+    (findByProps("Permissions") || {}).Permissions || {};
+  const ADD_REACT = PermConsts.ADD_REACTIONS;
 
   const unpatches = [];
   const lastFired = {};
@@ -113,24 +117,79 @@
     runDecode(message);
   }
 
-  // ---- double-tap: Discord's built-in double-tap adds a reaction, so we catch that ----
-  let doubleOK = false;
-  if ((MODE === "double" || MODE === "both") && ReactionActions && MessageStore) {
+  // ---- channels where reactions are off: Discord ignores the double-tap, so tell the app reactions are
+  //      allowed (client-side only) in channels that currently show a puzzle; our hooks below then catch it ----
+  const spoofCache = {};
+  function channelHasPuzzle(channelId) {
+    const now = Date.now();
+    const c = spoofCache[channelId];
+    if (c && now - c.t < 8000) return c.v;
+    let v = false;
     try {
-      unpatches.push(instead("addReaction", ReactionActions, function (args, orig) {
-        try {
-          const m = MessageStore.getMessage(args[0], args[1]) || MessageStore.getMessage(args[1], args[0]);
-          if (m && isPuzzle(m)) { fire(m); return; }      // swallow the reaction, decode instead
-        } catch (e) {}
-        return orig.apply(this, args);
-      }));
-      doubleOK = true;
-    } catch (e) { doubleOK = false; }
+      const msgs = MessageStore.getMessages(channelId);
+      const arr = (msgs && (msgs.toArray ? msgs.toArray() : msgs._array)) || [];
+      v = arr.slice(-40).some(isPuzzle);
+    } catch (e) {}
+    spoofCache[channelId] = { t: now, v: v };
+    return v;
   }
-  if ((MODE === "double" || MODE === "both") && !doubleOK) showToast("Quick Decode: double-tap hook unavailable, using hold");
+  let spoofOK = false;
+  if ((MODE === "double" || MODE === "both") && PermissionStore && PermissionStore.can && ADD_REACT !== undefined) {
+    try {
+      unpatches.push(instead("can", PermissionStore, function (args, orig) {
+        const res = orig.apply(this, args);
+        if (res) return res;
+        try {
+          if (args[0] === ADD_REACT && args[1] && args[1].id && channelHasPuzzle(args[1].id)) return true;
+        } catch (e) {}
+        return res;
+      }));
+      spoofOK = true;
+    } catch (e) {}
+  }
+
+  // ---- double-tap: Discord's built-in double-tap adds a reaction, so we catch that ----
+  let hookA = false, hookB = false;
+  const REACT_URL = /\/channels\/(\d+)\/messages\/(\d+)\/reactions\//;
+  if (MODE === "double" || MODE === "both") {
+    // A) the reaction action (swallows it before anything shows up)
+    if (ReactionActions && MessageStore) {
+      try {
+        unpatches.push(instead("addReaction", ReactionActions, function (args, orig) {
+          try {
+            const m = MessageStore.getMessage(args[0], args[1]) || MessageStore.getMessage(args[1], args[0]);
+            if (m && isPuzzle(m)) { fire(m); return; }
+          } catch (e) {}
+          return orig.apply(this, args);
+        }));
+        hookA = true;
+      } catch (e) {}
+    }
+    // B) fallback: the network call that adds a reaction (works even if the action above is named differently)
+    if (RestAPI && MessageStore && RestAPI.put) {
+      try {
+        unpatches.push(instead("put", RestAPI, function (args, orig) {
+          try {
+            const url = args[0] && args[0].url;
+            const hit = typeof url === "string" && REACT_URL.exec(url);
+            if (hit) {
+              const m = MessageStore.getMessage(hit[1], hit[2]);
+              if (m && isPuzzle(m)) {
+                fire(m);
+                return Promise.resolve({ ok: true, status: 204, body: {}, headers: {} });
+              }
+            }
+          } catch (e) {}
+          return orig.apply(this, args);
+        }));
+        hookB = true;
+      } catch (e) {}
+    }
+    if (!hookA && !hookB) showToast("Quick Decode: double-tap hook unavailable, using hold");
+  }
 
   // ---- hold (long-press) ----
-  if ((MODE === "hold" || MODE === "both" || !doubleOK) && ActionSheet && RestAPI) {
+  if ((MODE === "hold" || MODE === "both" || !(hookA || hookB)) && ActionSheet && RestAPI) {
     unpatches.push(before("openLazy", ActionSheet, function (args) {
       const key = args[1];
       if (key !== "MessageLongPressActionSheet") return;
@@ -141,8 +200,9 @@
     }));
   }
 
-  if (DEBUG) showToast("Quick Decode v6 loaded (" + MODE + (MODE !== "hold" ? ", double-tap " + (doubleOK ? "hooked" : "OFF") : "") + ")");
+  if (DEBUG) showToast("Quick Decode v8 loaded (" + MODE + (MODE !== "hold" ? ", double-tap hooks: " + (hookA ? "A" : "-") + (hookB ? "B" : "-") + (spoofOK ? "P" : "-") : "") + ")");
 
   exports.onUnload = function () { unpatches.forEach(function (u) { try { u(); } catch (e) {} }); };
   return exports;
 })({});
+        
