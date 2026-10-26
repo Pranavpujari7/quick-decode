@@ -8,14 +8,25 @@
   const HIDE_SHEET = true;                // close the long-press menu on puzzle messages
   const MODE = "both";                    // "double" = double-tap the puzzle, "hold" = long-press, "both"
   const DOUBLE_TAP_MS = 350;              // max gap between the two taps
-  const DEBUG = true;                     // show small toasts so we can see what the plugin is doing
+  const DEBUG = true;                     // show one status dialog a few seconds after Discord starts
   const CMD_ID = "";                      // optional: Decode command id (only if auto-lookup fails)
   const CMD_VERSION = "";                 // optional: Decode command version (usually same as id)
   // --------------------------------------------
 
   const { findByProps, findByStoreName, findByName } = vendetta.metro;
   const { before, instead } = vendetta.patcher;
-  const { showToast } = vendetta.ui.toasts;
+  const alerts = vendetta.ui.alerts;
+  let lastAlert = 0;
+  function say(msg) { try { console.log("[QuickDecode] " + msg); } catch (e) {} }
+  function alertMsg(msg) {                       // dialog instead of a toast (toasts crash this Discord build)
+    say(msg);
+    const now = Date.now();
+    if (now - lastAlert < 15000) return;
+    lastAlert = now;
+    setTimeout(function () {
+      try { alerts.showConfirmationAlert({ title: "Quick Decode", content: msg, confirmText: "OK" }); } catch (e) {}
+    }, 400);
+  }
 
   const ActionSheet = findByProps("openLazy", "hideActionSheet");
   const RestAPI = findByProps("getAPIBaseURL", "get");
@@ -104,7 +115,7 @@
       await RestAPI.post({ url: "/interactions", body: body });
     } catch (e) {
       cmdCache = null;
-      showToast("Quick Decode " + (e && e.step || step) + " failed: " + describe(e));
+      alertMsg("Quick Decode " + (e && e.step || step) + " failed: " + describe(e));
     }
   }
 
@@ -113,7 +124,7 @@
     const now = Date.now();
     if (lastFired[message.id] && now - lastFired[message.id] < 3000) return;
     lastFired[message.id] = now;
-    if (DEBUG) showToast("Quick Decode: decoding...");
+    say("decoding...");
     runDecode(message);
   }
 
@@ -185,7 +196,7 @@
         hookB = true;
       } catch (e) {}
     }
-    if (!hookA && !hookB) showToast("Quick Decode: double-tap hook unavailable, using hold");
+    if (!hookA && !hookB) say("double-tap hook unavailable, using hold");
   }
 
   // ---- hold (long-press) ----
@@ -200,9 +211,10 @@
     }));
   }
 
-  if (DEBUG) showToast("Quick Decode v8 loaded (" + MODE + (MODE !== "hold" ? ", double-tap hooks: " + (hookA ? "A" : "-") + (hookB ? "B" : "-") + (spoofOK ? "P" : "-") : "") + ")");
+  const status = ("Quick Decode v9 loaded (" + MODE + (MODE !== "hold" ? ", double-tap hooks: " + (hookA ? "A" : "-") + (hookB ? "B" : "-") + (spoofOK ? "P" : "-") : "") + ")");
+  say(status);
+  if (DEBUG) setTimeout(function () { alertMsg(status); }, 6000);
 
   exports.onUnload = function () { unpatches.forEach(function (u) { try { u(); } catch (e) {} }); };
   return exports;
 })({});
-        
