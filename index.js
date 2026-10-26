@@ -6,13 +6,16 @@
   const COMMAND_NAME = "Decode";          // the message command name
   const ONLY_AUTHOR_ID = "";              // optional: Paimon's user id, so only its messages trigger (empty = any bot message with an image)
   const HIDE_SHEET = true;                // close the long-press menu on puzzle messages
+  const MODE = "double";                  // "double" = double-tap the puzzle, "hold" = long-press, "both"
+  const DOUBLE_TAP_MS = 350;              // max gap between the two taps
   const DEBUG = true;                     // show small toasts so we can see what the plugin is doing
   const CMD_ID = "";                      // optional: Decode command id (only if auto-lookup fails)
   const CMD_VERSION = "";                 // optional: Decode command version (usually same as id)
   // --------------------------------------------
 
-  const { findByProps, findByStoreName } = vendetta.metro;
-  const { before } = vendetta.patcher;
+  const { findByProps, findByStoreName, findByName } = vendetta.metro;
+  const { before, after } = vendetta.patcher;
+  const React = vendetta.metro.common.React;
   const { showToast } = vendetta.ui.toasts;
 
   const ActionSheet = findByProps("openLazy", "hideActionSheet");
@@ -23,6 +26,8 @@
 
   const unpatches = [];
   const lastFired = {};
+  const lastTap = {};
+  let tapNoted = false;
   let cmdCache = null;
 
   function nonce() {
@@ -100,24 +105,101 @@
     }
   }
 
-  if (ActionSheet && RestAPI) {
+  // run Decode for a message (shared by double-tap and hold)
+  function fire(message) {
+    const now = Date.now();
+    if (lastFired[message.id] && now - lastFired[message.id] < 3000) return;
+    lastFired[message.id] = now;
+    if (DEBUG) showToast("Quick Decode: decoding...");
+    runDecode(message);
+  }
+
+  // ---- double-tap: wrap the message row's press handler ----
+  const PRESS_KEYS = ["onPress", "onTapMessage", "onPressMessage", "onTap"];
+
+  function findPress(node, depth) {
+    if (!node || typeof node !== "object" || depth > 4) return null;
+    const props = node.props;
+    if (props && typeof props === "object") {
+      for (let i = 0; i < PRESS_KEYS.length; i++) {
+        if (typeof props[PRESS_KEYS[i]] === "function") return { node: node, key: PRESS_KEYS[i] };
+      }
+      const kids = props.children;
+      const list = Array.isArray(kids) ? kids : (kids ? [kids] : []);
+      for (let j = 0; j < list.length; j++) {
+        const r = findPress(list[j], depth + 1);
+        if (r) return r;
+      }
+    }
+    return null;
+  }
+
+  function onTap(message) {
+    const now = Date.now();
+    const prev = lastTap[message.id] || 0;
+    lastTap[message.id] = now;
+    if (now - prev < DOUBLE_TAP_MS) {
+      lastTap[message.id] = 0;
+      fire(message);
+    }
+  }
+
+  function wrapRow(row, message) {
+    const hit = findPress(row, 0);
+    const make = function (orig) {
+      if (orig && orig.__qd) return orig;
+      const w = function () {
+        try { onTap(message); } catch (e) {}
+        return orig ? orig.apply(this, arguments) : undefined;
+      };
+      w.__qd = true;
+      return w;
+    };
+    if (hit) {
+      if (DEBUG && !tapNoted) { tapNoted = true; showToast("Quick Decode: tap hook on " + hit.key); }
+      const wrapped = make(hit.node.props[hit.key]);
+      if (hit.node === row) {
+        const patch = {}; patch[hit.key] = wrapped;
+        return React.cloneElement(row, patch);
+      }
+      try { hit.node.props[hit.key] = wrapped; } catch (e) {
+        try { hit.node.props = Object.assign({}, hit.node.props, (function () { const o = {}; o[hit.key] = wrapped; return o; })()); } catch (e2) {}
+      }
+      return row;
+    }
+    if (DEBUG && !tapNoted) {
+      tapNoted = true;
+      showToast("Quick Decode: no press handler. row keys: " + Object.keys((row && row.props) || {}).slice(0, 12).join(","));
+    }
+    return row;
+  }
+
+  let doubleOK = false;
+  if (MODE === "double" || MODE === "both") {
+    try {
+      const RowManager = findByName("RowManager");
+      if (RowManager && RowManager.prototype && RowManager.prototype.generate) {
+        unpatches.push(after("generate", RowManager.prototype, function (args, row) {
+          const data = args[0];
+          if (!data || !data.message || !row || !isPuzzle(data.message)) return;
+          return wrapRow(row, data.message);
+        }));
+        doubleOK = true;
+      }
+    } catch (e) { doubleOK = false; }
+    if (!doubleOK) showToast("Quick Decode: double-tap hook unavailable, using hold");
+  }
+
+  // ---- hold (long-press) ----
+  if ((MODE === "hold" || MODE === "both" || !doubleOK) && ActionSheet && RestAPI) {
     unpatches.push(before("openLazy", ActionSheet, function (args) {
       const key = args[1];
       if (key !== "MessageLongPressActionSheet") return;
       const message = args[2] && args[2].message;
-      if (!isPuzzle(message)) {
-        if (DEBUG) showToast("Quick Decode: skipped (" + (message ? "bot=" + !!(message.author && message.author.bot) + " embeds=" + (message.embeds || []).length : "no message") + ")");
-        return;
-      }
-      const now = Date.now();
-      if (lastFired[message.id] && now - lastFired[message.id] < 3000) return;
-      lastFired[message.id] = now;
-      if (DEBUG) showToast("Quick Decode: decoding...");
-      runDecode(message);
+      if (!isPuzzle(message)) return;
+      fire(message);
       if (HIDE_SHEET) setTimeout(function () { try { ActionSheet.hideActionSheet(); } catch (e) {} }, 120);
     }));
-  } else {
-    showToast("Quick Decode: could not hook the menu");
   }
 
   exports.onUnload = function () { unpatches.forEach(function (u) { try { u(); } catch (e) {} }); };
