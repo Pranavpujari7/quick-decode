@@ -2,18 +2,19 @@
   "use strict";
 
   // ---------- settings (edit these) ----------
-  const APP_ID = "1554104747273748550";   // your bot's application id
+  // Both ids are accepted: a bot's application id is normally the same number as its user id, but if you ever
+  // re-created the app the old id may still be listed.  The command that is found decides which one is sent.
+  const APP_IDS = ["1554084772618182746", "1554104747273748550"];
   const COMMAND_NAME = "Decode";          // the message command name
   const ONLY_AUTHOR_ID = "";              // optional: Paimon's user id, so only its messages trigger (empty = any bot message with an image)
   const HIDE_SHEET = true;                // close the long-press menu on puzzle messages
-  const MODE = "both";                    // "double" = double-tap the puzzle, "hold" = long-press, "both"
-  const DOUBLE_TAP_MS = 350;              // max gap between the two taps
+  const MODE = "both";                    // "double" = double-tap the puzzle (fastest), "hold" = long-press, "both"
   const DEBUG = true;                     // show one status dialog a few seconds after Discord starts
   const CMD_ID = "";                      // optional: Decode command id (only if auto-lookup fails)
   const CMD_VERSION = "";                 // optional: Decode command version (usually same as id)
   // --------------------------------------------
 
-  const { findByProps, findByStoreName, findByName } = vendetta.metro;
+  const { findByProps, findByStoreName } = vendetta.metro;
   const { before, instead } = vendetta.patcher;
   const alerts = vendetta.ui.alerts;
   let lastAlert = 0;
@@ -42,7 +43,67 @@
 
   const unpatches = [];
   const lastFired = {};
+
+  // ---------- the Decode command: found ONCE, then remembered (also across app restarts) ----------
+  // v10: the old version asked Discord for the command list on the first tap (up to 3 requests one after the other)
+  // and forgot it after any error.  Now: remembered on disk, looked up in the background at start-up, all lookups
+  // run in parallel, and a stale command is refreshed automatically with one instant retry.
+  let store = {};
+  try { store = vendetta.plugin.storage || {}; } catch (e) {}
+
+  function isDecode(c) {
+    return !!c && c.name === COMMAND_NAME && c.type === 3 && APP_IDS.indexOf(c.application_id) !== -1;
+  }
   let cmdCache = null;
+  try { if (CMD_ID) cmdCache = { id: CMD_ID, version: CMD_VERSION || CMD_ID, name: COMMAND_NAME, type: 3, application_id: APP_IDS[0] };
+        else if (isDecode(store.cmd)) cmdCache = store.cmd; } catch (e) {}
+  let inflight = null;
+
+  function remember(c) {
+    cmdCache = c;
+    try { store.cmd = c; } catch (e) {}
+  }
+  function forget() {
+    if (CMD_ID) return;                          // a hand-set id is never thrown away
+    cmdCache = null;
+    try { store.cmd = null; } catch (e) {}
+  }
+
+  function describe(e) {
+    const status = e && e.status;
+    const msg = (e && e.body && e.body.message) || (e && e.message) || "";
+    return (status ? status + " " : "") + msg;
+  }
+
+  // ask every command index at the same time, first hit wins
+  function lookup(channelId, guildId) {
+    const urls = ["/users/@me/application-command-index"];
+    if (channelId) urls.unshift("/channels/" + channelId + "/application-command-index");
+    if (guildId) urls.push("/guilds/" + guildId + "/application-command-index");
+    return new Promise(function (resolve, reject) {
+      let left = urls.length, done = false, lastErr = null;
+      function settle() { if (--left === 0 && !done) reject(lastErr || new Error("not in command list")); }
+      urls.forEach(function (u) {
+        let p;
+        try { p = RestAPI.get({ url: u }); } catch (e) { lastErr = e; settle(); return; }
+        Promise.resolve(p).then(function (res) {
+          const list = (res && res.body && res.body.application_commands) || [];
+          const found = list.find(isDecode);
+          if (found && !done) { done = true; resolve(found); }
+          settle();
+        }, function (e) { lastErr = e; settle(); });
+      });
+    });
+  }
+
+  function getCommand(channelId, guildId) {
+    if (cmdCache) return Promise.resolve(cmdCache);
+    if (!inflight) {
+      inflight = lookup(channelId, guildId).then(function (c) { remember(c); inflight = null; return c; },
+        function (e) { inflight = null; const err = new Error(describe(e) || "not in command list"); err.step = "find"; throw err; });
+    }
+    return inflight;
+  }
 
   function nonce() {
     try { return String(Snowflake.fromTimestamp(Date.now())); }
@@ -57,69 +118,53 @@
            ((message.components || []).length > 0);
   }
 
-  function describe(e) {
-    const status = e && e.status;
-    const msg = (e && e.body && e.body.message) || (e && e.message) || "";
-    return (status ? status + " " : "") + msg;
-  }
-
-  async function getCommand(channelId, guildId) {
-    if (CMD_ID) {
-      return { id: CMD_ID, version: CMD_VERSION || CMD_ID, name: COMMAND_NAME, type: 3, application_id: APP_ID };
-    }
-    if (cmdCache) return cmdCache;
-    const urls = ["/channels/" + channelId + "/application-command-index"];
-    if (guildId) urls.push("/guilds/" + guildId + "/application-command-index");
-    urls.push("/users/@me/application-command-index");
-    let lastErr = null;
-    for (let i = 0; i < urls.length; i++) {
-      try {
-        const res = await RestAPI.get({ url: urls[i] });
-        const list = (res.body && res.body.application_commands) || [];
-        const found = list.find(function (c) {
-          return c.application_id === APP_ID && c.name === COMMAND_NAME && c.type === 3;
-        });
-        if (found) { cmdCache = found; return found; }
-      } catch (e) { lastErr = e; }
-    }
-    const err = new Error(lastErr ? describe(lastErr) : "not in command list");
-    err.step = "find";
-    throw err;
+  function post(cmd, message, channelId, guildId) {
+    const body = {
+      type: 2,
+      application_id: cmd.application_id || APP_IDS[0],
+      channel_id: channelId,
+      session_id: SessionStore.getSessionId(),
+      nonce: nonce(),
+      data: {
+        version: cmd.version,
+        id: cmd.id,
+        name: cmd.name,
+        type: 3,
+        target_id: message.id,
+        application_command: cmd,
+      },
+      analytics_location: "context_menu",
+    };
+    if (guildId) body.guild_id = guildId;
+    return RestAPI.post({ url: "/interactions", body: body });
   }
 
   async function runDecode(message) {
+    const t0 = Date.now();
     const channelId = message.channel_id;
     const channel = ChannelStore.getChannel(channelId);
     const guildId = channel && channel.guild_id;
     let step = "find";
     try {
-      const cmd = await getCommand(channelId, guildId);
+      let cmd = await getCommand(channelId, guildId);
       step = "send";
-      const body = {
-        type: 2,
-        application_id: APP_ID,
-        channel_id: channelId,
-        session_id: SessionStore.getSessionId(),
-        nonce: nonce(),
-        data: {
-          version: cmd.version,
-          id: cmd.id,
-          name: cmd.name,
-          type: 3,
-          target_id: message.id,
-          application_command: cmd,
-        },
-        analytics_location: "context_menu",
-      };
-      if (guildId) body.guild_id = guildId;
-      await RestAPI.post({ url: "/interactions", body: body });
+      try {
+        await post(cmd, message, channelId, guildId);
+      } catch (e1) {                              // stale command id/version? refresh once and try again right away
+        forget();
+        step = "find";
+        cmd = await getCommand(channelId, guildId);
+        step = "send";
+        await post(cmd, message, channelId, guildId);
+      }
+      say("decode sent in " + (Date.now() - t0) + " ms");
     } catch (e) {
-      cmdCache = null;
+      forget();
       alertMsg("Quick Decode " + (e && e.step || step) + " failed: " + describe(e));
     }
   }
 
-  // run Decode for a message (shared by double-tap and hold)
+  // run Decode for a message (shared by double-tap and hold) - only ever on YOUR tap
   function fire(message) {
     const now = Date.now();
     if (lastFired[message.id] && now - lastFired[message.id] < 3000) return;
@@ -127,6 +172,9 @@
     say("decoding...");
     runDecode(message);
   }
+
+  // find the command in the background right after start-up, so the very first tap is already instant
+  if (!cmdCache) setTimeout(function () { getCommand(null, null).then(function () { say("Decode command ready"); }, function () {}); }, 2500);
 
   // ---- channels where reactions are off: Discord ignores the double-tap, so tell the app reactions are
   //      allowed (client-side only) in channels that currently show a puzzle; our hooks below then catch it ----
@@ -211,7 +259,7 @@
     }));
   }
 
-  const status = ("Quick Decode v9 loaded (" + MODE + (MODE !== "hold" ? ", double-tap hooks: " + (hookA ? "A" : "-") + (hookB ? "B" : "-") + (spoofOK ? "P" : "-") : "") + ")");
+  const status = ("Quick Decode v10 loaded (" + MODE + (MODE !== "hold" ? ", double-tap hooks: " + (hookA ? "A" : "-") + (hookB ? "B" : "-") + (spoofOK ? "P" : "-") : "") + (cmdCache ? ", command cached" : ", command not cached yet") + ")");
   say(status);
   if (DEBUG) setTimeout(function () { alertMsg(status); }, 6000);
 
