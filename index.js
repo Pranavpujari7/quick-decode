@@ -10,6 +10,10 @@
   const HIDE_SHEET = true;                // close the long-press menu on puzzle messages
   const MODE = "both";                    // "double" = double-tap the puzzle (fastest), "hold" = long-press, "both"
   const DEBUG = true;                     // show one status dialog a few seconds after Discord starts
+  const LOCAL_LINK = true;                // v11: hand puzzles straight to the bot on THIS phone (no Discord round trip). Falls back to Discord by itself
+  const LOCAL_URL = "http://127.0.0.1:8787";   // must match LOCAL_PORT in the bot file
+  const LOCAL_KEY = "qd";                 // must match LOCAL_KEY in the bot file
+  const PREFETCH = true;                  // v11: when a puzzle addressed to YOU appears in the channel you are looking at, tell the bot so it downloads the image now
   const CMD_ID = "";                      // optional: Decode command id (only if auto-lookup fails)
   const CMD_VERSION = "";                 // optional: Decode command version (usually same as id)
   // --------------------------------------------
@@ -37,6 +41,9 @@
   const MessageStore = findByStoreName("MessageStore");
   const ReactionActions = findByProps("addReaction", "removeReaction");
   const PermissionStore = findByStoreName("PermissionStore");
+  const SelectedChannelStore = findByStoreName("SelectedChannelStore");
+  const UserStore = findByStoreName("UserStore");
+  const Flux = (vendetta.metro.common && vendetta.metro.common.FluxDispatcher) || findByProps("dispatch", "subscribe");
   const PermConsts = (vendetta.metro.common.constants && vendetta.metro.common.constants.Permissions) ||
     (findByProps("Permissions") || {}).Permissions || {};
   const ADD_REACT = PermConsts.ADD_REACTIONS;
@@ -164,14 +171,103 @@
     }
   }
 
+  // ---------- v11: LOCAL LINK - plugin -> bot, both on this phone ----------
+  // Discord round trip (tap -> Discord -> bot) and the image download are the two slow parts.  The plugin already holds
+  // the message, so it hands it straight to the bot over 127.0.0.1; the bot may already have the image (prefetch).
+  // If the link is down / blocked / gives no answer, everything falls back to the normal Discord command below.
+  let localDownUntil = 0;
+  let localState = "not tested yet";
+  function img(p) { return p ? { url: p.url || "", proxy_url: p.proxyURL || p.proxy_url || "" } : null; }
+  function payload(m) {
+    return {
+      k: LOCAL_KEY,
+      id: m.id,
+      content: m.content || "",
+      embeds: (m.embeds || []).map(function (e) {
+        return {
+          title: e.rawTitle || e.title || "",
+          description: e.rawDescription || e.description || "",
+          author: e.author ? { name: e.author.name || "" } : null,
+          footer: e.footer ? { text: e.footer.text || "" } : null,
+          fields: (e.fields || []).map(function (f) { return { name: f.rawName || f.name || "", value: f.rawValue || f.value || "" }; }),
+          image: img(e.image),
+          thumbnail: img(e.thumbnail),
+        };
+      }),
+      attachments: (m.attachments || []).map(function (a) {
+        return { url: a.url, proxy_url: a.proxyURL || a.proxy_url, content_type: a.content_type || a.contentType };
+      }),
+    };
+  }
+  function localCall(path, body, ms) {
+    return new Promise(function (resolve, reject) {
+      const t = setTimeout(function () { reject(new Error("timeout")); }, ms);
+      let p;
+      try {
+        p = body ? fetch(LOCAL_URL + path, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify(body) })
+                 : fetch(LOCAL_URL + path);
+      } catch (e) { clearTimeout(t); reject(e); return; }
+      p.then(function (r) { return r.json(); }).then(function (j) { clearTimeout(t); resolve(j); },
+                                                   function (e) { clearTimeout(t); reject(e); });
+    });
+  }
+  function linkDown(e) { if (!e || e.message !== "timeout") localDownUntil = Date.now() + 20000; }
+
+  async function decodeNow(message) {
+    if (LOCAL_LINK && Date.now() >= localDownUntil) {
+      const t0 = Date.now();
+      try {
+        const r = await localCall("/decode", payload(message), 1500);
+        if (r && r.ok) { localState = "ok"; say("local decode ok in " + (Date.now() - t0) + " ms: " + r.answer); return; }
+        say("local decode gave no answer (" + (r && r.answer) + ") -> using Discord");
+      } catch (e) {
+        linkDown(e);
+        say("local link failed (" + (e && e.message) + ") -> using Discord");
+      }
+    }
+    runDecode(message);                         // fallback: the normal Decode command through Discord
+  }
+
   // run Decode for a message (shared by double-tap and hold) - only ever on YOUR tap
   function fire(message) {
     const now = Date.now();
     if (lastFired[message.id] && now - lastFired[message.id] < 3000) return;
     lastFired[message.id] = now;
     say("decoding...");
-    runDecode(message);
+    decodeNow(message);
   }
+
+  // ---- prefetch: a puzzle addressed to you shows up in the channel you are looking at -> bot downloads the image now.
+  //      Nothing is sent to Discord and nothing is answered; the bot only gets the image ready for your tap. ----
+  const preSeen = {};
+  function onNewMessage(ev) {
+    try {
+      const m = ev && ev.message;
+      if (!m || !m.id || preSeen[m.id] || !m.author || !m.author.bot) return;
+      if (ONLY_AUTHOR_ID && m.author.id !== ONLY_AUTHOR_ID) return;
+      if (!((m.embeds || []).length || (m.attachments || []).length)) return;
+      if (SelectedChannelStore && m.channel_id !== SelectedChannelStore.getChannelId()) return;
+      const me = UserStore && UserStore.getCurrentUser && UserStore.getCurrentUser();
+      if (me) {
+        const txt = (m.content || "") + " " + (m.embeds || []).map(function (e) { return (e.rawDescription || e.description || "") + " " + (e.rawTitle || e.title || ""); }).join(" ");
+        if (txt.indexOf("<@" + me.id + ">") < 0 && txt.indexOf("<@!" + me.id + ">") < 0) return;
+      }
+      if (Date.now() < localDownUntil) return;
+      preSeen[m.id] = 1;
+      localCall("/pre", payload(m), 1500).then(function () { localState = "ok"; }, linkDown);
+    } catch (e) {}
+  }
+  if (LOCAL_LINK && PREFETCH && Flux && Flux.subscribe) {
+    try {
+      Flux.subscribe("MESSAGE_CREATE", onNewMessage);
+      Flux.subscribe("MESSAGE_UPDATE", onNewMessage);
+      unpatches.push(function () { try { Flux.unsubscribe("MESSAGE_CREATE", onNewMessage); Flux.unsubscribe("MESSAGE_UPDATE", onNewMessage); } catch (e) {} });
+    } catch (e) {}
+  }
+  if (LOCAL_LINK) setTimeout(function () {                      // is the bot reachable from inside Discord? (some builds block plain http)
+    localCall("/ping", null, 2000).then(function (j) { localState = j && j.ok ? "ok" : "no answer"; },
+                                        function (e) { localState = "unreachable (" + (e && e.message) + ")"; linkDown(e); });
+  }, 2000);
 
   // find the command in the background right after start-up, so the very first tap is already instant
   if (!cmdCache) setTimeout(function () { getCommand(null, null).then(function () { say("Decode command ready"); }, function () {}); }, 2500);
@@ -259,9 +355,12 @@
     }));
   }
 
-  const status = ("Quick Decode v10 loaded (" + MODE + (MODE !== "hold" ? ", double-tap hooks: " + (hookA ? "A" : "-") + (hookB ? "B" : "-") + (spoofOK ? "P" : "-") : "") + (cmdCache ? ", command cached" : ", command not cached yet") + ")");
-  say(status);
-  if (DEBUG) setTimeout(function () { alertMsg(status); }, 6000);
+  function buildStatus() {
+    return "Quick Decode v11 loaded (" + MODE + (MODE !== "hold" ? ", double-tap hooks: " + (hookA ? "A" : "-") + (hookB ? "B" : "-") + (spoofOK ? "P" : "-") : "") +
+      (cmdCache ? ", command cached" : ", command not cached yet") + (LOCAL_LINK ? ", local link: " + localState : "") + ")";
+  }
+  say(buildStatus());
+  if (DEBUG) setTimeout(function () { alertMsg(buildStatus()); }, 6500);
 
   exports.onUnload = function () { unpatches.forEach(function (u) { try { u(); } catch (e) {} }); };
   return exports;
