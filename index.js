@@ -2,21 +2,21 @@
   "use strict";
 
   // ---------- settings (edit these) ----------
-  // Both ids are accepted: a bot's application id is normally the same number as its user id, but if you ever
-  // re-created the app the old id may still be listed.  The command that is found decides which one is sent.
   const APP_IDS = ["1554084772618182746", "1554104747273748550"];
-  const COMMAND_NAME = "Decode";          // the message command name
-  const ONLY_AUTHOR_ID = "";              // optional: Paimon's user id, so only its messages trigger (empty = any bot message with an image)
-  const HIDE_SHEET = true;                // close the long-press menu on puzzle messages
-  const MODE = "both";                    // "double" = double-tap the puzzle (fastest), "hold" = long-press, "both"
-  const DEBUG = true;                     // show one status dialog a few seconds after Discord starts
-  const LOCAL_LINK = true;                // v11: hand puzzles straight to the bot on THIS phone (no Discord round trip). Falls back to Discord by itself
-  const LOCAL_URL = "http://127.0.0.1:8787";   // must match LOCAL_PORT in the bot file
-  const LOCAL_KEY = "qd";                 // must match LOCAL_KEY in the bot file
-  const FILL_BOX = true;                  // v12: after a LOCAL decode, put the answer into the message box (it NEVER sends - you press send). false = off
-  const PREFETCH = true;                  // v11: when a puzzle addressed to YOU appears in the channel you are looking at, tell the bot so it downloads the image now
-  const CMD_ID = "";                      // optional: Decode command id (only if auto-lookup fails)
-  const CMD_VERSION = "";                 // optional: Decode command version (usually same as id)
+  const COMMAND_NAME = "Decode";
+  const ONLY_AUTHOR_ID = "";
+  const HIDE_SHEET = true;
+  const MODE = "both";                    // "double" | "hold" | "both"
+  const DEBUG = true;                     // one status dialog a few seconds after start
+  const LOCAL_LINK = true;
+  const LOCAL_URL = "http://127.0.0.1:8787";
+  const LOCAL_KEY = "qd";
+  const FILL_DEBUG = true;                // dialog after every tap saying what the box-fill did (set false once it works)
+  const FILL_BOX = true;                  // put the answer in the message box (NEVER sends)
+  const REFRESH_INPUT = false;            // v14: if the stored draft changes but the visible box doesn't, try true (re-selects the channel so the box reloads)
+  const PREFETCH = true;
+  const CMD_ID = "";
+  const CMD_VERSION = "";
   // --------------------------------------------
 
   const { findByProps, findByStoreName } = vendetta.metro;
@@ -24,7 +24,7 @@
   const alerts = vendetta.ui.alerts;
   let lastAlert = 0;
   function say(msg) { try { console.log("[QuickDecode] " + msg); } catch (e) {} }
-  function alertMsg(msg) {                       // dialog instead of a toast (toasts crash this Discord build)
+  function alertMsg(msg) {
     say(msg);
     const now = Date.now();
     if (now - lastAlert < 15000) return;
@@ -54,10 +54,7 @@
   const unpatches = [];
   const lastFired = {};
 
-  // ---------- the Decode command: found ONCE, then remembered (also across app restarts) ----------
-  // v10: the old version asked Discord for the command list on the first tap (up to 3 requests one after the other)
-  // and forgot it after any error.  Now: remembered on disk, looked up in the background at start-up, all lookups
-  // run in parallel, and a stale command is refreshed automatically with one instant retry.
+  // ---------- the Decode command ----------
   let store = {};
   try { store = vendetta.plugin.storage || {}; } catch (e) {}
 
@@ -69,23 +66,18 @@
         else if (isDecode(store.cmd)) cmdCache = store.cmd; } catch (e) {}
   let inflight = null;
 
-  function remember(c) {
-    cmdCache = c;
-    try { store.cmd = c; } catch (e) {}
-  }
+  function remember(c) { cmdCache = c; try { store.cmd = c; } catch (e) {} }
   function forget() {
-    if (CMD_ID) return;                          // a hand-set id is never thrown away
+    if (CMD_ID) return;
     cmdCache = null;
     try { store.cmd = null; } catch (e) {}
   }
-
   function describe(e) {
     const status = e && e.status;
     const msg = (e && e.body && e.body.message) || (e && e.message) || "";
     return (status ? status + " " : "") + msg;
   }
 
-  // ask every command index at the same time, first hit wins
   function lookup(channelId, guildId) {
     const urls = ["/users/@me/application-command-index"];
     if (channelId) urls.unshift("/channels/" + channelId + "/application-command-index");
@@ -135,14 +127,7 @@
       channel_id: channelId,
       session_id: SessionStore.getSessionId(),
       nonce: nonce(),
-      data: {
-        version: cmd.version,
-        id: cmd.id,
-        name: cmd.name,
-        type: 3,
-        target_id: message.id,
-        application_command: cmd,
-      },
+      data: { version: cmd.version, id: cmd.id, name: cmd.name, type: 3, target_id: message.id, application_command: cmd },
       analytics_location: "context_menu",
     };
     if (guildId) body.guild_id = guildId;
@@ -160,7 +145,7 @@
       step = "send";
       try {
         await post(cmd, message, channelId, guildId);
-      } catch (e1) {                              // stale command id/version? refresh once and try again right away
+      } catch (e1) {
         forget();
         step = "find";
         cmd = await getCommand(channelId, guildId);
@@ -174,10 +159,7 @@
     }
   }
 
-  // ---------- v11: LOCAL LINK - plugin -> bot, both on this phone ----------
-  // Discord round trip (tap -> Discord -> bot) and the image download are the two slow parts.  The plugin already holds
-  // the message, so it hands it straight to the bot over 127.0.0.1; the bot may already have the image (prefetch).
-  // If the link is down / blocked / gives no answer, everything falls back to the normal Discord command below.
+  // ---------- LOCAL LINK ----------
   let localDownUntil = 0;
   let localState = "not tested yet";
   function img(p) { return p ? { url: p.url || "", proxy_url: p.proxyURL || p.proxy_url || "" } : null; }
@@ -216,34 +198,68 @@
   }
   function linkDown(e) { if (!e || e.message !== "timeout") localDownUntil = Date.now() + 20000; }
 
-  // ---------- v12: put the answer into the message box (NEVER sends) ----------
-  // Only when ALL of these hold: it was a local decode with an answer, you are looking at the channel the puzzle is in,
-  // and the box is empty (so it never overwrites what you typed).  Anything unexpected -> it does nothing.
-  // These are idempotent "set the draft" calls (not "insert"), so running more than one can never duplicate the text.
+  // ---------- put the answer into the message box (NEVER sends) ----------
+  let rawDraftNote = "";
   function currentDraft(channelId) {
-    try { if (DraftStore && DraftStore.getDraft) return String(DraftStore.getDraft(channelId, 0) || ""); } catch (e) {}
-    return null;                                  // unknown
+    try {
+      if (DraftStore && DraftStore.getDraft) {
+        let v = DraftStore.getDraft(channelId, 0);
+        rawDraftNote = typeof v + (v && typeof v === "object" ? " " + JSON.stringify(v).slice(0, 80) : ":" + JSON.stringify(v));
+        if (v && typeof v === "object") v = v.draft !== undefined ? v.draft : (v.text !== undefined ? v.text : (v.content !== undefined ? v.content : ""));
+        return String(v || "");
+      }
+    } catch (e) { rawDraftNote = "error " + (e && e.message); }
+    return null;
   }
+  const INPUT_HELPERS = ["setChatInputText", "setInputText", "setText", "updateText"];
   function setBox(channelId, text) {
     const used = [];
     try { if (DraftActions && DraftActions.changeDraft) { DraftActions.changeDraft(channelId, text, 0); used.push("changeDraft"); } } catch (e) { say("changeDraft failed: " + (e && e.message)); }
     try { if (Flux && Flux.dispatch) { Flux.dispatch({ type: "DRAFT_CHANGE", channelId: channelId, draft: text, draftType: 0 }); used.push("flux"); } } catch (e) { say("flux draft failed: " + (e && e.message)); }
+    // v14: direct "set the input text" helpers, if this build has any (idempotent setters only)
+    INPUT_HELPERS.forEach(function (n) {
+      try { const mod = findByProps(n); if (mod && typeof mod[n] === "function") { mod[n](text); used.push(n); } } catch (e) {}
+    });
+    // v14: optional - re-select the channel so the visible box reloads from the draft
+    if (REFRESH_INPUT) {
+      try {
+        const ch = ChannelStore.getChannel(channelId);
+        Flux.dispatch({ type: "CHANNEL_SELECT", channelId: channelId, guildId: ch && ch.guild_id });
+        used.push("refresh");
+      } catch (e) {}
+    }
     return used;
+  }
+  function probeInput() {
+    const names = ["insertText", "setText", "setChatInputText", "updateText", "appendText", "setInputText"];
+    const hit = [];
+    names.forEach(function (n) { try { if (findByProps(n)) hit.push(n); } catch (e) {} });
+    return hit.length ? hit.join(",") : "none";
+  }
+  function fillReport(msg) {
+    say("box fill: " + msg);
+    if (!FILL_DEBUG) return;
+    setTimeout(function () {
+      try { alerts.showConfirmationAlert({ title: "Quick Decode box fill", content: msg, confirmText: "OK" }); } catch (e) {}
+    }, 300);
   }
   function fillBox(message, answer) {
     if (!FILL_BOX) return;
     try {
       const text = String(answer || "").replace(/\s+/g, " ").trim();
-      if (!text || text.length > 200) return;
+      if (!text || text.length > 200) { fillReport("skipped: empty or too long answer"); return; }
       const ch = message.channel_id;
-      if (!SelectedChannelStore || SelectedChannelStore.getChannelId() !== ch) { say("box fill skipped: not looking at that channel"); return; }
+      const viewing = SelectedChannelStore && SelectedChannelStore.getChannelId();
+      if (!SelectedChannelStore || viewing !== ch) { fillReport("skipped: not looking at that channel (viewing " + viewing + ", puzzle in " + ch + ")"); return; }
       const draft = currentDraft(ch);
-      if (draft === null) { say("box fill skipped: cannot check that the box is empty"); return; }
-      if (draft.trim() !== "") { say("box fill skipped: the box already has text"); return; }
+      if (draft === null) { fillReport("skipped: cannot read the box (DraftStore missing)"); return; }
+      if (draft.trim() !== "") { fillReport("skipped: the box already has text. getDraft gave " + rawDraftNote); return; }
       const used = setBox(ch, text);
-      if (!used.length) { say("box fill: no way to fill the box found"); return; }
-      say("box filled via " + used.join("+") + ": " + text + " (draft now reads: " + JSON.stringify(currentDraft(ch)) + ")");
-    } catch (e) { say("box fill failed: " + (e && e.message)); }
+      if (!used.length) { fillReport("no way to set the draft found. input helpers: " + probeInput()); return; }
+      const after = currentDraft(ch);
+      fillReport("set the draft via " + used.join("+") + " to \"" + text + "\". Store now reads: " + JSON.stringify(after) +
+        (after === text ? " (store took it)" : " (store did NOT take it)") + ". getDraft type: " + rawDraftNote + ". input helpers: " + probeInput());
+    } catch (e) { fillReport("failed: " + (e && e.message)); }
   }
 
   async function decodeNow(message) {
@@ -253,15 +269,18 @@
         const r = await localCall("/decode", payload(message), 1500);
         if (r && r.ok) { localState = "ok"; say("local decode ok in " + (Date.now() - t0) + " ms: " + r.answer); fillBox(message, r.answer); return; }
         say("local decode gave no answer (" + (r && r.answer) + ") -> using Discord");
+        if (FILL_BOX) fillReport("not filled: the bot gave no answer over the local link (" + (r && r.answer) + "), so Discord was used instead");
       } catch (e) {
         linkDown(e);
         say("local link failed (" + (e && e.message) + ") -> using Discord");
+        if (FILL_BOX) fillReport("not filled: local link failed (" + (e && e.message) + "), so Discord was used instead");
       }
+    } else if (LOCAL_LINK && FILL_BOX) {
+      fillReport("not filled: local link is marked down for another " + Math.ceil((localDownUntil - Date.now()) / 1000) + " s, so Discord was used instead");
     }
-    runDecode(message);                         // fallback: the normal Decode command through Discord
+    runDecode(message);
   }
 
-  // run Decode for a message (shared by double-tap and hold) - only ever on YOUR tap
   function fire(message) {
     const now = Date.now();
     if (lastFired[message.id] && now - lastFired[message.id] < 3000) return;
@@ -270,8 +289,7 @@
     decodeNow(message);
   }
 
-  // ---- prefetch: a puzzle addressed to you shows up in the channel you are looking at -> bot downloads the image now.
-  //      Nothing is sent to Discord and nothing is answered; the bot only gets the image ready for your tap. ----
+  // ---------- prefetch ----------
   const preSeen = {};
   function onNewMessage(ev) {
     try {
@@ -297,16 +315,14 @@
       unpatches.push(function () { try { Flux.unsubscribe("MESSAGE_CREATE", onNewMessage); Flux.unsubscribe("MESSAGE_UPDATE", onNewMessage); } catch (e) {} });
     } catch (e) {}
   }
-  if (LOCAL_LINK) setTimeout(function () {                      // is the bot reachable from inside Discord? (some builds block plain http)
+  if (LOCAL_LINK) setTimeout(function () {
     localCall("/ping", null, 2000).then(function (j) { localState = j && j.ok ? "ok" : "no answer"; },
                                         function (e) { localState = "unreachable (" + (e && e.message) + ")"; linkDown(e); });
   }, 2000);
 
-  // find the command in the background right after start-up, so the very first tap is already instant
   if (!cmdCache) setTimeout(function () { getCommand(null, null).then(function () { say("Decode command ready"); }, function () {}); }, 2500);
 
-  // ---- channels where reactions are off: Discord ignores the double-tap, so tell the app reactions are
-  //      allowed (client-side only) in channels that currently show a puzzle; our hooks below then catch it ----
+  // ---------- channels where reactions are off ----------
   const spoofCache = {};
   function channelHasPuzzle(channelId) {
     const now = Date.now();
@@ -336,11 +352,10 @@
     } catch (e) {}
   }
 
-  // ---- double-tap: Discord's built-in double-tap adds a reaction, so we catch that ----
-  let hookA = false, hookB = false;
+  // ---------- double-tap ----------
+  let hookA = false, hookB = false, hookH = false;
   const REACT_URL = /\/channels\/(\d+)\/messages\/(\d+)\/reactions\//;
   if (MODE === "double" || MODE === "both") {
-    // A) the reaction action (swallows it before anything shows up)
     if (ReactionActions && MessageStore) {
       try {
         unpatches.push(instead("addReaction", ReactionActions, function (args, orig) {
@@ -353,19 +368,17 @@
         hookA = true;
       } catch (e) {}
     }
-    // B) fallback: the network call that adds a reaction (works even if the action above is named differently)
-    if (RestAPI && MessageStore && RestAPI.put) {
+    // B) fallback: the network call that adds a reaction
+    if (RestAPI && MessageStore) {
       try {
         unpatches.push(instead("put", RestAPI, function (args, orig) {
           try {
-            const url = args[0] && args[0].url;
-            const hit = typeof url === "string" && REACT_URL.exec(url);
-            if (hit) {
-              const m = MessageStore.getMessage(hit[1], hit[2]);
-              if (m && isPuzzle(m)) {
-                fire(m);
-                return Promise.resolve({ ok: true, status: 204, body: {}, headers: {} });
-              }
+            const a = args[0];
+            const url = typeof a === "string" ? a : (a && a.url) || "";
+            const mt = REACT_URL.exec(url);
+            if (mt) {
+              const m = MessageStore.getMessage(mt[1], mt[2]);
+              if (m && isPuzzle(m)) { fire(m); return Promise.resolve({ ok: true, status: 204, body: {} }); }
             }
           } catch (e) {}
           return orig.apply(this, args);
@@ -373,30 +386,45 @@
         hookB = true;
       } catch (e) {}
     }
-    if (!hookA && !hookB) say("double-tap hook unavailable, using hold");
   }
 
-  // ---- hold (long-press) ----
-  if ((MODE === "hold" || MODE === "both" || !(hookA || hookB)) && ActionSheet && RestAPI) {
-    unpatches.push(before("openLazy", ActionSheet, function (args) {
-      const key = args[1];
-      if (key !== "MessageLongPressActionSheet") return;
-      const message = args[2] && args[2].message;
-      if (!isPuzzle(message)) return;
-      fire(message);
-      if (HIDE_SHEET) setTimeout(function () { try { ActionSheet.hideActionSheet(); } catch (e) {} }, 120);
-    }));
+  // ---------- hold (long-press) ----------
+  if ((MODE === "hold" || MODE === "both") && ActionSheet && ActionSheet.openLazy) {
+    try {
+      unpatches.push(before("openLazy", ActionSheet, function (args) {
+        try {
+          const key = args[1];
+          const ctx = args[2];
+          const message = ctx && ctx.message;
+          if (key === "MessageLongPressActionSheet" && message && isPuzzle(message)) {
+            fire(message);
+            if (HIDE_SHEET) setTimeout(function () { try { ActionSheet.hideActionSheet(); } catch (e) {} }, 0);
+          }
+        } catch (e) {}
+      }));
+      hookH = true;
+    } catch (e) {}
   }
 
-  function buildStatus() {
-    return "Quick Decode v12 loaded (" + MODE + (MODE !== "hold" ? ", double-tap hooks: " + (hookA ? "A" : "-") + (hookB ? "B" : "-") + (spoofOK ? "P" : "-") : "") +
-      (cmdCache ? ", command cached" : ", command not cached yet") + (LOCAL_LINK ? ", local link: " + localState : "") +
-      (FILL_BOX ? ", box fill: draftStore " + (DraftStore && DraftStore.getDraft ? "ok" : "MISSING") + ", changeDraft " + (DraftActions && DraftActions.changeDraft ? "ok" : "MISSING") + ", flux " + (Flux && Flux.dispatch ? "ok" : "MISSING") : "") + ")";
-  }
-  say(buildStatus());
-  if (DEBUG) setTimeout(function () { alertMsg(buildStatus()); }, 6500);
+  // ---------- status dialog ----------
+  if (DEBUG) setTimeout(function () {
+    try {
+      alerts.showConfirmationAlert({
+        title: "Quick Decode v14",
+        content: "mode " + MODE + "; reaction hook " + (hookA ? "ok" : "MISSING") + "; network hook " + (hookB ? "ok" : "MISSING") +
+          "; hold hook " + (hookH ? "ok" : "off/MISSING") + "; permission spoof " + (spoofOK ? "ok" : "off") +
+          "; command " + (cmdCache ? "ready" : "not found yet") + "; local link " + localState +
+          "; box fill: draftStore " + (DraftStore && DraftStore.getDraft ? "ok" : "MISSING") +
+          ", changeDraft " + (DraftActions && DraftActions.changeDraft ? "ok" : "MISSING") +
+          ", flux " + (Flux && Flux.dispatch ? "ok" : "MISSING") + ", input helpers " + probeInput(),
+        confirmText: "OK",
+      });
+    } catch (e) {}
+  }, 6500);
 
-  exports.onUnload = function () { unpatches.forEach(function (u) { try { u(); } catch (e) {} }); };
+  exports.onUnload = function () {
+    unpatches.forEach(function (u) { try { u(); } catch (e) {} });
+    unpatches.length = 0;
+  };
   return exports;
-})({});
-  
+})({})
