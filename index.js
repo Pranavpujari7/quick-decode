@@ -13,6 +13,7 @@
   const LOCAL_LINK = true;                // v11: hand puzzles straight to the bot on THIS phone (no Discord round trip). Falls back to Discord by itself
   const LOCAL_URL = "http://127.0.0.1:8787";   // must match LOCAL_PORT in the bot file
   const LOCAL_KEY = "qd";                 // must match LOCAL_KEY in the bot file
+  const FILL_BOX = true;                  // v12: after a LOCAL decode, put the answer into the message box (it NEVER sends - you press send). false = off
   const PREFETCH = true;                  // v11: when a puzzle addressed to YOU appears in the channel you are looking at, tell the bot so it downloads the image now
   const CMD_ID = "";                      // optional: Decode command id (only if auto-lookup fails)
   const CMD_VERSION = "";                 // optional: Decode command version (usually same as id)
@@ -43,6 +44,8 @@
   const PermissionStore = findByStoreName("PermissionStore");
   const SelectedChannelStore = findByStoreName("SelectedChannelStore");
   const UserStore = findByStoreName("UserStore");
+  const DraftStore = findByStoreName("DraftStore");
+  const DraftActions = findByProps("changeDraft");
   const Flux = (vendetta.metro.common && vendetta.metro.common.FluxDispatcher) || findByProps("dispatch", "subscribe");
   const PermConsts = (vendetta.metro.common.constants && vendetta.metro.common.constants.Permissions) ||
     (findByProps("Permissions") || {}).Permissions || {};
@@ -213,12 +216,42 @@
   }
   function linkDown(e) { if (!e || e.message !== "timeout") localDownUntil = Date.now() + 20000; }
 
+  // ---------- v12: put the answer into the message box (NEVER sends) ----------
+  // Only when ALL of these hold: it was a local decode with an answer, you are looking at the channel the puzzle is in,
+  // and the box is empty (so it never overwrites what you typed).  Anything unexpected -> it does nothing.
+  // These are idempotent "set the draft" calls (not "insert"), so running more than one can never duplicate the text.
+  function currentDraft(channelId) {
+    try { if (DraftStore && DraftStore.getDraft) return String(DraftStore.getDraft(channelId, 0) || ""); } catch (e) {}
+    return null;                                  // unknown
+  }
+  function setBox(channelId, text) {
+    const used = [];
+    try { if (DraftActions && DraftActions.changeDraft) { DraftActions.changeDraft(channelId, text, 0); used.push("changeDraft"); } } catch (e) { say("changeDraft failed: " + (e && e.message)); }
+    try { if (Flux && Flux.dispatch) { Flux.dispatch({ type: "DRAFT_CHANGE", channelId: channelId, draft: text, draftType: 0 }); used.push("flux"); } } catch (e) { say("flux draft failed: " + (e && e.message)); }
+    return used;
+  }
+  function fillBox(message, answer) {
+    if (!FILL_BOX) return;
+    try {
+      const text = String(answer || "").replace(/\s+/g, " ").trim();
+      if (!text || text.length > 200) return;
+      const ch = message.channel_id;
+      if (!SelectedChannelStore || SelectedChannelStore.getChannelId() !== ch) { say("box fill skipped: not looking at that channel"); return; }
+      const draft = currentDraft(ch);
+      if (draft === null) { say("box fill skipped: cannot check that the box is empty"); return; }
+      if (draft.trim() !== "") { say("box fill skipped: the box already has text"); return; }
+      const used = setBox(ch, text);
+      if (!used.length) { say("box fill: no way to fill the box found"); return; }
+      say("box filled via " + used.join("+") + ": " + text + " (draft now reads: " + JSON.stringify(currentDraft(ch)) + ")");
+    } catch (e) { say("box fill failed: " + (e && e.message)); }
+  }
+
   async function decodeNow(message) {
     if (LOCAL_LINK && Date.now() >= localDownUntil) {
       const t0 = Date.now();
       try {
         const r = await localCall("/decode", payload(message), 1500);
-        if (r && r.ok) { localState = "ok"; say("local decode ok in " + (Date.now() - t0) + " ms: " + r.answer); return; }
+        if (r && r.ok) { localState = "ok"; say("local decode ok in " + (Date.now() - t0) + " ms: " + r.answer); fillBox(message, r.answer); return; }
         say("local decode gave no answer (" + (r && r.answer) + ") -> using Discord");
       } catch (e) {
         linkDown(e);
@@ -356,8 +389,9 @@
   }
 
   function buildStatus() {
-    return "Quick Decode v11 loaded (" + MODE + (MODE !== "hold" ? ", double-tap hooks: " + (hookA ? "A" : "-") + (hookB ? "B" : "-") + (spoofOK ? "P" : "-") : "") +
-      (cmdCache ? ", command cached" : ", command not cached yet") + (LOCAL_LINK ? ", local link: " + localState : "") + ")";
+    return "Quick Decode v12 loaded (" + MODE + (MODE !== "hold" ? ", double-tap hooks: " + (hookA ? "A" : "-") + (hookB ? "B" : "-") + (spoofOK ? "P" : "-") : "") +
+      (cmdCache ? ", command cached" : ", command not cached yet") + (LOCAL_LINK ? ", local link: " + localState : "") +
+      (FILL_BOX ? ", box fill: draftStore " + (DraftStore && DraftStore.getDraft ? "ok" : "MISSING") + ", changeDraft " + (DraftActions && DraftActions.changeDraft ? "ok" : "MISSING") + ", flux " + (Flux && Flux.dispatch ? "ok" : "MISSING") : "") + ")";
   }
   say(buildStatus());
   if (DEBUG) setTimeout(function () { alertMsg(buildStatus()); }, 6500);
@@ -365,3 +399,4 @@
   exports.onUnload = function () { unpatches.forEach(function (u) { try { u(); } catch (e) {} }); };
   return exports;
 })({});
+  
