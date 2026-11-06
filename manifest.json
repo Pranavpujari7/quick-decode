@@ -1,8 +1,8 @@
 {
-  "name": "Quick Decode",
-  "description": "Double-tap (or hold) a heist puzzle message and your Decode app runs instantly (no Apps menu).",
+  "name": "Quick Decode v11 (optional)",
+  "description": "Optional older version: double-tap (or hold) a heist puzzle; talks to the bot on your phone, no sending.",
   "authors": [{ "name": "you", "id": "0" }],
   "main": "index.js",
-  "hash": "qd16",
+  "hash": "qd11",
   "vendetta": { "icon": "ic_message_edit" }
 }
