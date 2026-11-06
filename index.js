@@ -13,7 +13,8 @@
   const LOCAL_KEY = "qd";
   const FILL_DEBUG = true;                // dialog after every tap saying what the box-fill did (set false once it works)
   const FILL_BOX = true;                  // put the answer in the message box (NEVER sends)
-  const REFRESH_INPUT = false;            // v14: if the stored draft changes but the visible box doesn't, try true (re-selects the channel so the box reloads)
+  const REFRESH_INPUT = true;             // v15: the stored draft changes but the visible box doesn't, so reload the channel after filling
+  const REFRESH_MODE = "same";            // "same" = re-select this channel; "bounce" = hop to another channel and straight back (use if "same" does nothing)
   const PREFETCH = true;
   const CMD_ID = "";
   const CMD_VERSION = "";
@@ -220,12 +221,28 @@
     INPUT_HELPERS.forEach(function (n) {
       try { const mod = findByProps(n); if (mod && typeof mod[n] === "function") { mod[n](text); used.push(n); } } catch (e) {}
     });
-    // v14: optional - re-select the channel so the visible box reloads from the draft
+    // v15: make the visible box reload from the stored draft
     if (REFRESH_INPUT) {
       try {
         const ch = ChannelStore.getChannel(channelId);
-        Flux.dispatch({ type: "CHANNEL_SELECT", channelId: channelId, guildId: ch && ch.guild_id });
-        used.push("refresh");
+        const gid = ch && ch.guild_id;
+        const sel = function (id, g) { Flux.dispatch({ type: "CHANNEL_SELECT", channelId: id, guildId: g }); };
+        setTimeout(function () {
+          try {
+            if (REFRESH_MODE === "bounce") {
+              let other = null;
+              try { other = SelectedChannelStore.getMostRecentSelectedTextChannelId && SelectedChannelStore.getMostRecentSelectedTextChannelId(gid); } catch (e) {}
+              if (other && other !== channelId) {
+                const oc = ChannelStore.getChannel(other);
+                sel(other, oc && oc.guild_id);
+                setTimeout(function () { try { sel(channelId, gid); } catch (e) {} }, 120);
+                return;
+              }
+            }
+            sel(channelId, gid);
+          } catch (e) { say("refresh failed: " + (e && e.message)); }
+        }, 150);
+        used.push("refresh-" + REFRESH_MODE);
       } catch (e) {}
     }
     return used;
@@ -410,7 +427,7 @@
   if (DEBUG) setTimeout(function () {
     try {
       alerts.showConfirmationAlert({
-        title: "Quick Decode v14",
+        title: "Quick Decode v15",
         content: "mode " + MODE + "; reaction hook " + (hookA ? "ok" : "MISSING") + "; network hook " + (hookB ? "ok" : "MISSING") +
           "; hold hook " + (hookH ? "ok" : "off/MISSING") + "; permission spoof " + (spoofOK ? "ok" : "off") +
           "; command " + (cmdCache ? "ready" : "not found yet") + "; local link " + localState +
