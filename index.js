@@ -366,9 +366,8 @@
     decodeNow(message);
   }
 
-  // ---- prefetch: a puzzle addressed to you shows up in the channel you are looking at -> bot downloads the image now.
-  //      Nothing is sent to Discord and nothing is answered; the bot only gets the image ready for your tap. ----
-  const preSeen = {};
+  // ---- prefetch: a puzzle addressed to you shows up in the channel you are looking at
+ const preSeen = {};
   function onNewMessage(ev) {
     try {
       const m = ev && ev.message;
