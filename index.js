@@ -1,25 +1,22 @@
 (function (exports) {
   "use strict";
-
-  // ---------- settings (edit these) ----------
   const APP_IDS = ["1554084772618182746", "1554104747273748550"];
   const COMMAND_NAME = "Decode";
   const ONLY_AUTHOR_ID = "";
   const HIDE_SHEET = true;
-  const MODE = "both";                    // "double" | "hold" | "both"
-  const DEBUG = true;                     // one status dialog a few seconds after start
+  const MODE = "both";
+  const DEBUG = true;
   const LOCAL_LINK = true;
   const LOCAL_URL = "http://127.0.0.1:8787";
   const LOCAL_KEY = "qd";
-  const FILL_DEBUG = true;                // dialog after every tap saying what the box-fill did (set false once it works)
-  const FILL_BOX = true;                  // put the answer in the message box (NEVER sends)
-  const REFRESH_INPUT = true;             // v15: the stored draft changes but the visible box doesn't, so reload the channel after filling
-  const REFRESH_MODE = "same";            // "same" = re-select this channel; "bounce" = hop to another channel and straight back (use if "same" does nothing)
+  const FILL_DEBUG = false;
+  const FILL_BOX = true;
+  const REFRESH_INPUT = true;
+  const REFRESH_MODE = "bounce";
+  const AUTO_SEND = true;
   const PREFETCH = true;
   const CMD_ID = "";
   const CMD_VERSION = "";
-  // --------------------------------------------
-
   const { findByProps, findByStoreName } = vendetta.metro;
   const { before, instead } = vendetta.patcher;
   const alerts = vendetta.ui.alerts;
@@ -34,7 +31,6 @@
       try { alerts.showConfirmationAlert({ title: "Quick Decode", content: msg, confirmText: "OK" }); } catch (e) {}
     }, 400);
   }
-
   const ActionSheet = findByProps("openLazy", "hideActionSheet");
   const RestAPI = findByProps("getAPIBaseURL", "get");
   const SessionStore = findByProps("getSessionId");
@@ -51,14 +47,10 @@
   const PermConsts = (vendetta.metro.common.constants && vendetta.metro.common.constants.Permissions) ||
     (findByProps("Permissions") || {}).Permissions || {};
   const ADD_REACT = PermConsts.ADD_REACTIONS;
-
   const unpatches = [];
   const lastFired = {};
-
-  // ---------- the Decode command ----------
   let store = {};
   try { store = vendetta.plugin.storage || {}; } catch (e) {}
-
   function isDecode(c) {
     return !!c && c.name === COMMAND_NAME && c.type === 3 && APP_IDS.indexOf(c.application_id) !== -1;
   }
@@ -66,7 +58,6 @@
   try { if (CMD_ID) cmdCache = { id: CMD_ID, version: CMD_VERSION || CMD_ID, name: COMMAND_NAME, type: 3, application_id: APP_IDS[0] };
         else if (isDecode(store.cmd)) cmdCache = store.cmd; } catch (e) {}
   let inflight = null;
-
   function remember(c) { cmdCache = c; try { store.cmd = c; } catch (e) {} }
   function forget() {
     if (CMD_ID) return;
@@ -78,7 +69,6 @@
     const msg = (e && e.body && e.body.message) || (e && e.message) || "";
     return (status ? status + " " : "") + msg;
   }
-
   function lookup(channelId, guildId) {
     const urls = ["/users/@me/application-command-index"];
     if (channelId) urls.unshift("/channels/" + channelId + "/application-command-index");
@@ -98,7 +88,6 @@
       });
     });
   }
-
   function getCommand(channelId, guildId) {
     if (cmdCache) return Promise.resolve(cmdCache);
     if (!inflight) {
@@ -107,12 +96,10 @@
     }
     return inflight;
   }
-
   function nonce() {
     try { return String(Snowflake.fromTimestamp(Date.now())); }
     catch (e) { return String(Date.now() - 1420070400000) + String(Math.floor(Math.random() * 1e7)); }
   }
-
   function isPuzzle(message) {
     if (!message || !message.author || !message.author.bot) return false;
     if (ONLY_AUTHOR_ID && message.author.id !== ONLY_AUTHOR_ID) return false;
@@ -120,7 +107,6 @@
            ((message.attachments || []).length > 0) ||
            ((message.components || []).length > 0);
   }
-
   function post(cmd, message, channelId, guildId) {
     const body = {
       type: 2,
@@ -134,7 +120,6 @@
     if (guildId) body.guild_id = guildId;
     return RestAPI.post({ url: "/interactions", body: body });
   }
-
   async function runDecode(message) {
     const t0 = Date.now();
     const channelId = message.channel_id;
@@ -159,8 +144,6 @@
       alertMsg("Quick Decode " + (e && e.step || step) + " failed: " + describe(e));
     }
   }
-
-  // ---------- LOCAL LINK ----------
   let localDownUntil = 0;
   let localState = "not tested yet";
   function img(p) { return p ? { url: p.url || "", proxy_url: p.proxyURL || p.proxy_url || "" } : null; }
@@ -198,8 +181,6 @@
     });
   }
   function linkDown(e) { if (!e || e.message !== "timeout") localDownUntil = Date.now() + 20000; }
-
-  // ---------- put the answer into the message box (NEVER sends) ----------
   let rawDraftNote = "";
   function currentDraft(channelId) {
     try {
@@ -217,11 +198,9 @@
     const used = [];
     try { if (DraftActions && DraftActions.changeDraft) { DraftActions.changeDraft(channelId, text, 0); used.push("changeDraft"); } } catch (e) { say("changeDraft failed: " + (e && e.message)); }
     try { if (Flux && Flux.dispatch) { Flux.dispatch({ type: "DRAFT_CHANGE", channelId: channelId, draft: text, draftType: 0 }); used.push("flux"); } } catch (e) { say("flux draft failed: " + (e && e.message)); }
-    // v14: direct "set the input text" helpers, if this build has any (idempotent setters only)
     INPUT_HELPERS.forEach(function (n) {
       try { const mod = findByProps(n); if (mod && typeof mod[n] === "function") { mod[n](text); used.push(n); } } catch (e) {}
     });
-    // v15: make the visible box reload from the stored draft
     if (REFRESH_INPUT) {
       try {
         const ch = ChannelStore.getChannel(channelId);
@@ -232,10 +211,17 @@
             if (REFRESH_MODE === "bounce") {
               let other = null;
               try { other = SelectedChannelStore.getMostRecentSelectedTextChannelId && SelectedChannelStore.getMostRecentSelectedTextChannelId(gid); } catch (e) {}
+              if (!other || other === channelId) {
+                try {
+                  const list = ChannelStore.getMutableGuildChannelsForGuild ? ChannelStore.getMutableGuildChannelsForGuild(gid) : {};
+                  const f = Object.keys(list || {}).find(function (k) { return k !== channelId && list[k] && list[k].type === 0; });
+                  if (f) other = f;
+                } catch (e) {}
+              }
               if (other && other !== channelId) {
                 const oc = ChannelStore.getChannel(other);
                 sel(other, oc && oc.guild_id);
-                setTimeout(function () { try { sel(channelId, gid); } catch (e) {} }, 120);
+                setTimeout(function () { try { sel(channelId, gid); } catch (e) {} }, 100);
                 return;
               }
             }
@@ -266,6 +252,11 @@
       const text = String(answer || "").replace(/\s+/g, " ").trim();
       if (!text || text.length > 200) { fillReport("skipped: empty or too long answer"); return; }
       const ch = message.channel_id;
+      if (AUTO_SEND) {
+        Promise.resolve(RestAPI.post({ url: "/channels/" + ch + "/messages", body: { content: text, nonce: nonce(), tts: false } }))
+          .then(function () { fillReport("AUTO_SEND: sent \"" + text + "\""); }, function (e) { fillReport("AUTO_SEND failed: " + describe(e)); });
+        return;
+      }
       const viewing = SelectedChannelStore && SelectedChannelStore.getChannelId();
       if (!SelectedChannelStore || viewing !== ch) { fillReport("skipped: not looking at that channel (viewing " + viewing + ", puzzle in " + ch + ")"); return; }
       const draft = currentDraft(ch);
@@ -278,7 +269,6 @@
         (after === text ? " (store took it)" : " (store did NOT take it)") + ". getDraft type: " + rawDraftNote + ". input helpers: " + probeInput());
     } catch (e) { fillReport("failed: " + (e && e.message)); }
   }
-
   async function decodeNow(message) {
     if (LOCAL_LINK && Date.now() >= localDownUntil) {
       const t0 = Date.now();
@@ -297,7 +287,6 @@
     }
     runDecode(message);
   }
-
   function fire(message) {
     const now = Date.now();
     if (lastFired[message.id] && now - lastFired[message.id] < 3000) return;
@@ -305,8 +294,6 @@
     say("decoding...");
     decodeNow(message);
   }
-
-  // ---------- prefetch ----------
   const preSeen = {};
   function onNewMessage(ev) {
     try {
@@ -336,10 +323,7 @@
     localCall("/ping", null, 2000).then(function (j) { localState = j && j.ok ? "ok" : "no answer"; },
                                         function (e) { localState = "unreachable (" + (e && e.message) + ")"; linkDown(e); });
   }, 2000);
-
   if (!cmdCache) setTimeout(function () { getCommand(null, null).then(function () { say("Decode command ready"); }, function () {}); }, 2500);
-
-  // ---------- channels where reactions are off ----------
   const spoofCache = {};
   function channelHasPuzzle(channelId) {
     const now = Date.now();
@@ -368,8 +352,6 @@
       spoofOK = true;
     } catch (e) {}
   }
-
-  // ---------- double-tap ----------
   let hookA = false, hookB = false, hookH = false;
   const REACT_URL = /\/channels\/(\d+)\/messages\/(\d+)\/reactions\//;
   if (MODE === "double" || MODE === "both") {
@@ -385,7 +367,6 @@
         hookA = true;
       } catch (e) {}
     }
-    // B) fallback: the network call that adds a reaction
     if (RestAPI && MessageStore) {
       try {
         unpatches.push(instead("put", RestAPI, function (args, orig) {
@@ -404,8 +385,6 @@
       } catch (e) {}
     }
   }
-
-  // ---------- hold (long-press) ----------
   if ((MODE === "hold" || MODE === "both") && ActionSheet && ActionSheet.openLazy) {
     try {
       unpatches.push(before("openLazy", ActionSheet, function (args) {
@@ -422,12 +401,10 @@
       hookH = true;
     } catch (e) {}
   }
-
-  // ---------- status dialog ----------
   if (DEBUG) setTimeout(function () {
     try {
       alerts.showConfirmationAlert({
-        title: "Quick Decode v15",
+        title: "Quick Decode v16",
         content: "mode " + MODE + "; reaction hook " + (hookA ? "ok" : "MISSING") + "; network hook " + (hookB ? "ok" : "MISSING") +
           "; hold hook " + (hookH ? "ok" : "off/MISSING") + "; permission spoof " + (spoofOK ? "ok" : "off") +
           "; command " + (cmdCache ? "ready" : "not found yet") + "; local link " + localState +
@@ -438,10 +415,10 @@
       });
     } catch (e) {}
   }, 6500);
-
   exports.onUnload = function () {
     unpatches.forEach(function (u) { try { u(); } catch (e) {} });
     unpatches.length = 0;
   };
   return exports;
 })({})
+    
