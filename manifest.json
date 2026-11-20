@@ -1,8 +1,8 @@
 {
-  "name": "Quick Decode v11 (optional)",
-  "description": "Optional older version: double-tap (or hold) a heist puzzle; talks to the bot on your phone, no sending.",
-  "authors": [{ "name": "you", "id": "0" }],
+  "name": "Scout",
+  "description": "Hold the Heist Map -> auto scout. Sends <=5 moves per message, shows time left. Talks to flee5.py on 127.0.0.1.",
+  "authors": [{ "name": "you" }],
   "main": "index.js",
-  "hash": "qd11",
-  "vendetta": { "icon": "ic_message_edit" }
+  "hash": "scout1",
+  "vendetta": { "icon": "ic_map" }
 }
