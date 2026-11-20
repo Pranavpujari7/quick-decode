@@ -1,8 +1,7 @@
 {
-  "name": "Scout",
-  "description": "Hold the Heist Map -> auto scout. Sends <=5 moves per message, shows time left. Talks to flee5.py on 127.0.0.1.",
-  "authors": [{ "name": "you" }],
+  "name": "Heist Auto Scout",
+  "description": "Long-press the Heist Map -> auto scout (desks, keycards, vault, safe) then flee, sending only the wasd moves. Needs flee5.py running in Termux.",
+  "authors": [{ "name": "you", "id": "0" }],
   "main": "index.js",
-  "hash": "scout1",
-  "vendetta": { "icon": "ic_map" }
+  "vendetta": { "icon": "ic_search" }
 }
