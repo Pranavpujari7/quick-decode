@@ -1,7 +1,8 @@
 {
-  "name": "Heist Auto Scout",
-  "description": "Long-press the Heist Map -> auto scout (desks, keycards, vault, safe) then flee, sending only the wasd moves. Needs flee5.py running in Termux.",
+  "name": "fake Decode",
+  "description": "Double-tap a heist puzzle to decode it. Hold a Heist Map to flee: sends the route (stairs too, asks which stairs go down), 5 letters per message.",
   "authors": [{ "name": "you", "id": "0" }],
   "main": "index.js",
-  "vendetta": { "icon": "ic_search" }
+  "hash": "qd19",
+  "vendetta": { "icon": "ic_message_edit" }
 }
