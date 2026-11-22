@@ -1,8 +1,8 @@
 {
   "name": "fake Decode",
-  "description": "Double-tap a heist puzzle to decode it. Hold a Heist Map to flee: sends the route (stairs too, asks which stairs go down), 5 letters per message.",
+  "description": "Hold a heist puzzle to decode it. Hold a Heist Map for a menu: Flee (stairs, guards), Auto loot (every desk of the room), Normal menu.",
   "authors": [{ "name": "you", "id": "0" }],
   "main": "index.js",
-  "hash": "qd19",
+  "hash": "qd22",
   "vendetta": { "icon": "ic_message_edit" }
 }
