@@ -71,7 +71,7 @@ const status = e && e.status;
 const msg = (e && e.body && e.body.message) || (e && e.message) || "";
 return (status ? status + " " : "") + msg;
 }
-function lookup(channelId, guildId) {
+function lookup(channelId, guildId, pred) {
 const urls = ["/users/@me/application-command-index"];
 if (channelId) urls.unshift("/channels/" + channelId + "/application-command-index");
 if (guildId) urls.push("/guilds/" + guildId + "/application-command-index");
@@ -83,7 +83,7 @@ let p;
 try { p = RestAPI.get({ url: u }); } catch (e) { lastErr = e; settle(); return; }
 Promise.resolve(p).then(function (res) {
 const list = (res && res.body && res.body.application_commands) || [];
-const found = list.find(isDecode);
+const found = list.find(pred || isDecode);
 if (found && !done) { done = true; resolve(found); }
 settle();
 }, function (e) { lastErr = e; settle(); });
@@ -316,6 +316,25 @@ fillReport("not filled: local link is marked down for another " + Math.ceil((loc
 }
 runDecode(message);
 }
+const SHOW_PICTURE = true;
+const MENU = true;
+const LOOT_ROUNDS = 80;
+let lastSheet = null;
+const namedCache = {};
+async function runNamed(name, message) {
+const channelId = message.channel_id;
+const channel = ChannelStore.getChannel(channelId);
+const guildId = channel && channel.guild_id;
+const pred = function (c) { return !!c && c.name === name && c.type === 3 && APP_IDS.indexOf(c.application_id) !== -1; };
+let cmd = namedCache[name] || (namedCache[name] = await lookup(channelId, guildId, pred));
+try {
+await post(cmd, message, channelId, guildId);
+} catch (e1) {
+delete namedCache[name];
+cmd = namedCache[name] = await lookup(channelId, guildId, pred);
+await post(cmd, message, channelId, guildId);
+}
+}
 function askChoice(title, labels) {
 return new Promise(function (resolve) {
 let done = false;
@@ -341,7 +360,7 @@ setTimeout(function () { show(0); }, 300);
 });
 }
 const FLEE_CHUNK = 5;
-const FLEE_ROUNDS = 25;
+const FLEE_ROUNDS = 60;
 const FLEE_WAIT = 9000;
 const G = (typeof globalThis !== "undefined") ? globalThis : {};
 const fleeBusy = {};
@@ -403,7 +422,7 @@ const ch = message.channel_id;
 const now = Date.now();
 if (fleeBusy[ch] || (G.__qdFleeUntil && now < G.__qdFleeUntil)) { say("flee already running"); return; }
 fleeBusy[ch] = true;
-G.__qdFleeUntil = now + 120000;
+G.__qdFleeUntil = now + 600000;
 try {
 if (!SelectedChannelStore || SelectedChannelStore.getChannelId() !== ch) { alertMsg("Flee: open the heist channel first"); return; }
 let cur = latestMap(ch, message);
@@ -418,6 +437,11 @@ catch (e) { linkDown(e); alertMsg("Flee: bot not reachable (" + (e && e.message)
 choice = null;
 if (r && !r.ok && r.ask && r.ask.length && asks < 4) {
 asks++;
+if (asks === 1 && SHOW_PICTURE) {
+let shown = false;
+try { await runNamed("Flee", cur); shown = true; } catch (e) { say("stairs picture failed: " + describe(e)); }
+if (shown) { say("flee: stairs picture sent by the bot - pick A / B there, then hold the map again"); return; }
+}
 const idx = await askChoice(r.answer || "Which stairs go DOWN?", r.ask);
 if (idx === null || idx === undefined) { say("flee: stairs question not answered"); return; }
 choice = idx;
@@ -425,16 +449,17 @@ round--;
 continue;
 }
 if (!r || !r.ok) { alertMsg("Flee: " + ((r && r.answer) || "no answer")); return; }
+if (r.send) { sendText(ch, r.send); alertMsg("Flee: " + (r.answer || "") + " - sent \"" + r.send + "\". Tap Flee again when the guard is dead"); return; }
 const steps = String(r.steps || "").toLowerCase().replace(/[^wasd]/g, "");
 const stairs = /STAIRS/.test(String(r.answer || ""));
 if (!steps) { say("flee: nothing to move"); if (round === 0) alertMsg(stairs ? "Flee: " + r.answer : "Flee: you are on the exit - type Flee"); return; }
-if (steps.length >= prevLen) {
+if (!r.more && steps.length >= prevLen) {
 stuck++;
 if (stuck >= 2) { alertMsg("Flee: stuck - the moves are not changing your position (wall or locked door?)"); return; }
 } else stuck = 0;
-prevLen = steps.length;
+prevLen = r.more ? 1e9 : steps.length;
 say("flee route (" + steps.length + "): " + steps);
-const last = steps.length <= FLEE_CHUNK;
+const last = steps.length <= FLEE_CHUNK && !r.more;
 const wait = (!last || stairs) ? waitForMap(ch, seen, FLEE_WAIT) : null;
 if (!sendText(ch, steps.slice(0, FLEE_CHUNK))) { alertMsg("Flee: could not send"); return; }
 if (last && !stairs) return;
@@ -453,6 +478,62 @@ Flux.subscribe("MESSAGE_CREATE", onMapEvent);
 Flux.subscribe("MESSAGE_UPDATE", onMapEvent);
 unpatches.push(function () { try { Flux.unsubscribe("MESSAGE_CREATE", onMapEvent); Flux.unsubscribe("MESSAGE_UPDATE", onMapEvent); } catch (e) {} });
 } catch (e) {}
+}
+async function lootNow(message) {
+const ch = message.channel_id;
+const now = Date.now();
+if (fleeBusy[ch] || (G.__qdFleeUntil && now < G.__qdFleeUntil)) { say("flee/loot already running"); return; }
+fleeBusy[ch] = true;
+G.__qdFleeUntil = now + 600000;
+try {
+if (!SelectedChannelStore || SelectedChannelStore.getChannelId() !== ch) { alertMsg("Loot: open the heist channel first"); return; }
+let cur = latestMap(ch, message);
+const seen = {};
+seen[cur.id] = 1; seen[message.id] = 1;
+let first = true;
+for (let round = 0; round < LOOT_ROUNDS; round++) {
+if (SelectedChannelStore.getChannelId() !== ch) { say("loot stopped: left the channel"); return; }
+let r;
+try { r = await localCall("/loot", Object.assign(payload(cur), { reset: first }), 6000); }
+catch (e) { linkDown(e); alertMsg("Loot: bot not reachable (" + (e && e.message) + ")"); return; }
+first = false;
+if (!r || !r.ok) { alertMsg("Loot: " + ((r && r.answer) || "no answer")); return; }
+const steps = String(r.steps || "").toLowerCase().replace(/[^wasd]/g, "");
+if (r.done || !steps) { alertMsg("Loot: " + (r.answer || "done")); return; }
+say("loot: " + r.answer + " -> " + steps);
+const wait = waitForMap(ch, seen, FLEE_WAIT);
+if (!sendText(ch, steps.slice(0, FLEE_CHUNK))) { alertMsg("Loot: could not send"); return; }
+const nm = await wait;
+if (!nm) { alertMsg("Loot: the bot did not answer with a new map"); return; }
+seen[nm.id] = 1;
+cur = nm;
+}
+alertMsg("Loot: stopped after " + LOOT_ROUNDS + " rounds");
+} finally { fleeBusy[ch] = false; G.__qdFleeUntil = 0; }
+}
+function openHeistMenu(message) {
+const items = [
+{ label: "Flee", run: function () { fleeNow(message); } },
+{ label: "Auto loot", run: function () { lootNow(message); } },
+{ label: "Normal menu", run: function () { try { if (lastSheet) lastSheet.orig.apply(ActionSheet, lastSheet.args); } catch (e) { say("normal menu failed: " + (e && e.message)); } } },
+];
+function show(i) {
+const it = items[i];
+const last = i === items.length - 1;
+setTimeout(function () {
+try {
+alerts.showConfirmationAlert({
+title: "Heist menu (" + (i + 1) + "/" + items.length + ")",
+content: it.label + "?   Tap " + (last ? "Close to leave" : "More for the next option") + ".",
+confirmText: it.label,
+cancelText: last ? "Close" : "More",
+onConfirm: function () { it.run(); },
+onCancel: function () { if (!last) show(i + 1); },
+});
+} catch (e) { say("menu failed: " + (e && e.message)); fleeNow(message); }
+}, 150);
+}
+show(0);
 }
 function fire(message) {
 const now = Date.now();
@@ -495,7 +576,7 @@ const spoofCache = {};
 function handleMessage(message) {
 if (!message || !message.id) return false;
 if (message.author && message.author.bot && isHeistMap(message) && mentionsMe(message)) {
-fleeNow(message);
+if (MENU) openHeistMenu(message); else fleeNow(message);
 return true;
 }
 if (isPuzzle(message) && (MODE === "both" || MODE === "decode")) {
@@ -510,7 +591,10 @@ try {
 const key = args[1];
 const ctx = args[2] || {};
 const message = ctx.message;
-if (key === "MessageLongPressActionSheet" && message && handleMessage(message) && HIDE_SHEET) return;
+if (key === "MessageLongPressActionSheet" && message) {
+lastSheet = { orig: orig, args: args };
+if (handleMessage(message) && HIDE_SHEET) return;
+}
 } catch (e) { say("sheet patch error: " + (e && e.message)); }
 return orig.apply(this, args);
 }));
